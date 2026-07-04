@@ -1,0 +1,833 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<!-- ============================================================
+     HAND PARTICLES + CAMERA DISTORTION — v1.0
+     Single-file interactive experience:
+       * MediaPipe Hands  -> fingertip tracking (both hands)
+       * Three.js         -> GPU particle system (Points + custom shaders)
+       * Custom GLSL      -> live camera feed with ripple / glitch distortion
+       * 5 presets        -> Fire, Glitch, Galaxy, Chrome, Neon
+     Mobile-first: iOS Safari, front camera, portrait, 30fps target.
+     HTTPS is required for camera access (see README / note at bottom).
+     ============================================================ -->
+<meta charset="utf-8">
+<title>Hand Particles v1.0</title>
+<!-- viewport-fit=cover -> draw under the iPhone notch; no zoom gestures -->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="icon" href="data:,"><!-- inline no-op favicon: avoids a 404 request -->
+
+<style>
+/* ============================================================
+   SECTION: CSS — fullscreen canvas + minimal floating UI
+   ============================================================ */
+html, body {
+  margin: 0; padding: 0;
+  width: 100%; height: 100%;
+  overflow: hidden;
+  background: #000;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  /* stop iOS Safari rubber-banding / double-tap zoom */
+  touch-action: none;
+  -webkit-user-select: none; user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Three.js canvas fills the screen behind everything */
+#stage { position: fixed; inset: 0; }
+#stage canvas { display: block; width: 100%; height: 100%; }
+
+/* Hidden <video> that feeds both MediaPipe and the WebGL texture.
+   It must stay "on screen" for iOS to keep decoding it, so we park it
+   at 1px, nearly invisible, instead of display:none. */
+#cam {
+  position: fixed; bottom: 0; left: 0;
+  width: 2px; height: 2px; opacity: 0.01;
+  pointer-events: none;
+}
+
+/* --- Start overlay (iOS needs a user gesture before camera starts) --- */
+#overlay {
+  position: fixed; inset: 0; z-index: 30;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  background: radial-gradient(ellipse at 50% 40%, #101528 0%, #000 75%);
+  color: #fff; text-align: center; padding: 24px;
+  transition: opacity .5s ease;
+}
+#overlay.hidden { opacity: 0; pointer-events: none; }
+#overlay h1 { font-size: 22px; font-weight: 700; letter-spacing: .04em; margin: 0 0 8px; }
+#overlay p  { font-size: 14px; opacity: .65; max-width: 300px; line-height: 1.5; margin: 0 0 28px; }
+#startBtn {
+  font-size: 17px; font-weight: 600; color: #000;
+  background: #fff; border: none; border-radius: 999px;
+  padding: 14px 44px; cursor: pointer;
+}
+#startBtn:active { transform: scale(.96); }
+#status { margin-top: 18px; font-size: 12px; opacity: .5; min-height: 16px; }
+
+/* --- Preset buttons (bottom bar) --- */
+#presets {
+  position: fixed; z-index: 20;
+  left: 0; right: 0;
+  bottom: calc(10px + env(safe-area-inset-bottom));
+  display: flex; justify-content: center; gap: 6px;
+  padding: 0 8px;
+}
+.preset {
+  flex: 0 1 auto;
+  font-size: 11px; font-weight: 600; letter-spacing: .02em;
+  color: rgba(255,255,255,.75);
+  background: rgba(20,20,28,.55);
+  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 999px;
+  padding: 9px 12px; cursor: pointer;
+  white-space: nowrap;
+}
+.preset.active {
+  color: #000; background: #fff; border-color: #fff;
+}
+.preset:active { transform: scale(.95); }
+
+/* --- Fullscreen button (top-right) --- */
+#fsBtn {
+  position: fixed; z-index: 20;
+  top: calc(10px + env(safe-area-inset-top));
+  right: calc(10px + env(safe-area-inset-right));
+  width: 40px; height: 40px;
+  display: flex; align-items: center; justify-content: center;
+  color: rgba(255,255,255,.8);
+  background: rgba(20,20,28,.55);
+  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 12px; cursor: pointer;
+}
+#fsBtn svg { width: 18px; height: 18px; }
+#fsBtn:active { transform: scale(.92); }
+
+/* Pseudo-fullscreen fallback (iPhone Safari has no Fullscreen API):
+   we just hide the UI chrome so only the canvas remains. */
+body.pseudo-fs #presets { opacity: 0; pointer-events: none; }
+#presets { transition: opacity .3s ease; }
+
+/* --- tiny FPS/debug readout, top-left --- */
+#hud {
+  position: fixed; z-index: 20;
+  top: calc(14px + env(safe-area-inset-top));
+  left: calc(12px + env(safe-area-inset-left));
+  font-size: 10px; color: rgba(255,255,255,.4);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+</style>
+</head>
+<body>
+
+<!-- ============================================================
+     SECTION: DOM — stage, video, overlay, UI controls
+     ============================================================ -->
+<div id="stage"></div>
+<video id="cam" autoplay muted playsinline></video>
+
+<div id="overlay">
+  <h1>HAND&nbsp;PARTICLES</h1>
+  <p>Allow camera access, then move your hands in front of the front camera. Particles trail off your fingertips and warp the video.</p>
+  <button id="startBtn">Tap to start</button>
+  <div id="status"></div>
+</div>
+
+<div id="presets">
+  <button class="preset active" data-preset="fire">🔥 Fire</button>
+  <button class="preset" data-preset="glitch">📼 Glitch</button>
+  <button class="preset" data-preset="galaxy">🌌 Galaxy</button>
+  <button class="preset" data-preset="chrome">🫧 Chrome</button>
+  <button class="preset" data-preset="neon">⚡ Neon</button>
+</div>
+
+<button id="fsBtn" aria-label="Fullscreen">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+    <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>
+  </svg>
+</button>
+
+<div id="hud"></div>
+
+<!-- ============================================================
+     SECTION: LIBRARIES
+     MediaPipe Hands is a classic (non-module) script; Three.js is
+     imported as an ES module inside the main script below.
+     Versions are pinned so a CDN update can't break the page.
+     ============================================================ -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.min.js"></script>
+
+<script type="module">
+import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+
+/* ============================================================
+   SECTION: PRESETS
+   Each preset is a plain config object. Switching presets just
+   swaps this object and pushes a few uniforms — no reload, the
+   live particle pool and video pipeline keep running.
+   ============================================================ */
+const PRESETS = {
+  fire: {                    // rising embers, warm ripple
+    colorA: 0xff6a00, colorB: 0xffd766,
+    size: 34,                // base point size (px at reference depth)
+    birthRate: 90,           // particles / fingertip / second (at rest)
+    speedBoost: 14,          // extra emission per unit of hand speed
+    lifetime: 1.6,           // seconds
+    inherit: 0.55,           // how much fingertip velocity particles keep
+    spread: 0.55,            // random velocity spread
+    gravity: [0, 1.6, 0],    // buoyancy: embers float up
+    swirl: 0.4,              // rotation around emitter
+    turbAmp: 1.8, turbFreq: 2.2,  // turbulence force
+    drag: 1.6,               // velocity damping
+    distortion: 1.0,         // video ripple multiplier (per hand speed)
+    rgbShift: 0.35,          // chromatic aberration amount
+    glitch: 0.0,             // blocky datamosh rows (0..1)
+    scanline: 0.0,           // CRT scanline overlay (0..1)
+    dim: 0.55                // how much the video is darkened
+  },
+  glitch: {                  // datamosh: blocky tears + RGB split
+    colorA: 0x00f0ff, colorB: 0xff00c8,
+    size: 26, birthRate: 70, speedBoost: 20, lifetime: 1.1,
+    inherit: 0.9, spread: 1.4,
+    gravity: [0, 0, 0], swirl: 0.0,
+    turbAmp: 5.0, turbFreq: 6.0, drag: 2.4,
+    distortion: 1.6, rgbShift: 1.0, glitch: 1.0, scanline: 0.35, dim: 0.45
+  },
+  galaxy: {                  // slow drifting nebula dust
+    colorA: 0x7a5cff, colorB: 0x3fd0ff,
+    size: 40, birthRate: 55, speedBoost: 8, lifetime: 3.5,
+    inherit: 0.3, spread: 0.25,
+    gravity: [0, 0.05, 0], swirl: 1.4,
+    turbAmp: 0.7, turbFreq: 1.1, drag: 0.7,
+    distortion: 0.55, rgbShift: 0.25, glitch: 0.0, scanline: 0.0, dim: 0.65
+  },
+  chrome: {                  // liquid chrome: viscous silver ripples
+    colorA: 0xdfe9f5, colorB: 0x8fb8ff,
+    size: 30, birthRate: 65, speedBoost: 10, lifetime: 2.2,
+    inherit: 0.4, spread: 0.3,
+    gravity: [0, -0.35, 0], swirl: 0.15,
+    turbAmp: 0.9, turbFreq: 1.6, drag: 3.2,
+    distortion: 2.2, rgbShift: 0.15, glitch: 0.0, scanline: 0.0, dim: 0.5
+  },
+  neon: {                    // neon wireframe: sharp fast sparks + scanlines
+    colorA: 0x39ff88, colorB: 0xff2bd6,
+    size: 16, birthRate: 110, speedBoost: 24, lifetime: 0.9,
+    inherit: 1.1, spread: 1.0,
+    gravity: [0, 0, 0], swirl: 0.6,
+    turbAmp: 3.2, turbFreq: 4.5, drag: 2.0,
+    distortion: 1.2, rgbShift: 0.6, glitch: 0.35, scanline: 1.0, dim: 0.5
+  }
+};
+let preset = PRESETS.fire;
+
+/* ============================================================
+   SECTION: RENDERER / SCENE / CAMERA
+   The 3D camera sits at z = CAM_Z looking at the origin. The video
+   plane lives at z = 0 and is sized to exactly fill the frustum, so
+   particles spawned at z in (0, CAM_Z) are literally *between* the
+   viewer's image and the camera — real depth, real parallax.
+   ============================================================ */
+const CAM_Z = 4.5;
+const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+
+const renderer = new THREE.WebGLRenderer({
+  antialias: false,               // AA off: big fill-rate win on iPhone GPUs
+  powerPreference: 'high-performance'
+});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, isMobile ? 1.5 : 2));
+document.getElementById('stage').appendChild(renderer.domElement);
+
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 50);
+camera.position.set(0, 0, CAM_Z);
+
+// World-space size of the video plane (recomputed on resize)
+let planeW = 1, planeH = 1;
+
+/* ============================================================
+   SECTION: VIDEO DISTORTION SHADER
+   Full-screen plane textured with the live camera feed.
+   Fragment shader does, in order:
+     1. hand-centered ripples  (displacement ∝ hand speed)
+     2. blocky row-tear glitch (datamosh style, preset-gated)
+     3. object-fit:cover crop + horizontal mirror (selfie view)
+     4. RGB channel split ∝ global distortion
+     5. scanlines + vignette + dim so particles read on top
+   ============================================================ */
+const videoTex = new THREE.VideoTexture(document.getElementById('cam'));
+videoTex.colorSpace = THREE.SRGBColorSpace;
+
+const videoUniforms = {
+  uTex:        { value: videoTex },
+  uTime:       { value: 0 },
+  uCover:      { value: new THREE.Vector2(1, 1) },      // cover-crop scale
+  uHands:      { value: [new THREE.Vector3(-10,-10,0),  // xy = screen uv,
+                         new THREE.Vector3(-10,-10,0)] },// z  = hand speed
+  uDistortion: { value: 0 },                            // smoothed global
+  uRGBShift:   { value: preset.rgbShift },
+  uGlitch:     { value: preset.glitch },
+  uScanline:   { value: preset.scanline },
+  uDim:        { value: preset.dim }
+};
+
+const videoMat = new THREE.ShaderMaterial({
+  uniforms: videoUniforms,
+  depthWrite: false,
+  vertexShader: /* glsl */`
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }`,
+  fragmentShader: /* glsl */`
+    precision highp float;
+    varying vec2 vUv;
+    uniform sampler2D uTex;
+    uniform float uTime, uDistortion, uRGBShift, uGlitch, uScanline, uDim;
+    uniform vec2  uCover;
+    uniform vec3  uHands[2];
+
+    // cheap hash noise (no texture lookups — iOS-safe, WebGL1-safe)
+    float hash(float n) { return fract(sin(n) * 43758.5453123); }
+
+    void main() {
+      vec2 uv = vUv;
+
+      // --- 1. ripples radiating from each detected hand ---
+      for (int i = 0; i < 2; i++) {
+        vec3 h = uHands[i];
+        if (h.z <= 0.001) continue;
+        vec2  d    = uv - h.xy;
+        float dist = length(d) + 1e-4;
+        // ring wave, exponentially fading with distance, scaled by speed
+        float wave = sin(dist * 34.0 - uTime * 9.0) * exp(-dist * 5.0);
+        uv += (d / dist) * wave * h.z * 0.045;
+      }
+
+      // --- 2. blocky row tears (datamosh) ---
+      if (uGlitch > 0.001) {
+        float row  = floor(uv.y * 36.0);
+        float r    = hash(row * 17.31 + floor(uTime * 14.0) * 0.37);
+        float gate = step(1.0 - 0.35 * uGlitch * clamp(uDistortion * 3.0, 0.1, 1.0), r);
+        uv.x += gate * (hash(row * 3.7) - 0.5) * 0.25 * uGlitch;
+      }
+
+      // --- 3. mirror (selfie) + object-fit:cover crop ---
+      vec2 suv = vec2(1.0 - uv.x, uv.y);
+      suv = (suv - 0.5) * uCover + 0.5;
+      suv = clamp(suv, 0.001, 0.999);
+
+      // --- 4. RGB split, offset grows with distortion ---
+      float sh = uDistortion * uRGBShift * 0.012;
+      vec3 col;
+      col.r = texture2D(uTex, suv + vec2( sh, 0.0)).r;
+      col.g = texture2D(uTex, suv).g;
+      col.b = texture2D(uTex, suv - vec2( sh, 0.0)).b;
+
+      // --- 5. scanlines, vignette, dim ---
+      if (uScanline > 0.001) {
+        col *= 1.0 - uScanline * 0.18 * (0.5 + 0.5 * sin(vUv.y * 700.0));
+      }
+      float vig = smoothstep(1.25, 0.35, length(vUv - 0.5));
+      col *= mix(0.4, 1.0, vig);
+      col *= (1.0 - uDim * 0.6);
+
+      gl_FragColor = vec4(col, 1.0);
+    }`
+});
+
+const videoPlane = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), videoMat);
+videoPlane.renderOrder = 0;
+scene.add(videoPlane);
+
+/* ============================================================
+   SECTION: PARTICLE SYSTEM
+   One THREE.Points with a custom ShaderMaterial — a single draw
+   call for the whole pool (GPU instancing for point sprites).
+   Simulation (spawn / forces / integration) runs on the CPU over
+   flat Float32Arrays; only `position` + `aLife` upload per frame.
+   Pool is a ring buffer: dead particles get recycled at emitters.
+   ============================================================ */
+const COUNT = isMobile ? 2500 : 5000;
+
+const positions = new Float32Array(COUNT * 3);   // xyz, uploaded per frame
+const velocities = new Float32Array(COUNT * 3);  // xyz, CPU only
+const life  = new Float32Array(COUNT);           // 0..1 remaining, uploaded
+const seeds = new Float32Array(COUNT);           // per-particle random, static
+for (let i = 0; i < COUNT; i++) { positions[i*3+1] = -999; seeds[i] = Math.random(); }
+let cursor = 0;                                   // ring-buffer write head
+
+const pGeo = new THREE.BufferGeometry();
+pGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3).setUsage(THREE.DynamicDrawUsage));
+pGeo.setAttribute('aLife',    new THREE.BufferAttribute(life, 1).setUsage(THREE.DynamicDrawUsage));
+pGeo.setAttribute('aSeed',    new THREE.BufferAttribute(seeds, 1));
+pGeo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 100); // skip recompute
+
+const particleUniforms = {
+  uSize:   { value: preset.size },
+  uColorA: { value: new THREE.Color(preset.colorA) },
+  uColorB: { value: new THREE.Color(preset.colorB) },
+  uTime:   { value: 0 }
+};
+
+const pMat = new THREE.ShaderMaterial({
+  uniforms: particleUniforms,
+  transparent: true,
+  depthWrite: false,               // additive particles: never occlude
+  depthTest: true,
+  blending: THREE.AdditiveBlending,
+  vertexShader: /* glsl */`
+    attribute float aLife;
+    attribute float aSeed;
+    uniform float uSize, uTime;
+    varying float vLife;
+    varying float vSeed;
+    void main() {
+      vLife = aLife;
+      vSeed = aSeed;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      // pop in fast, shrink out — and perspective size attenuation
+      float grow = smoothstep(0.0, 0.15, 1.0 - aLife) * aLife;
+      // subtle per-particle flicker
+      float flick = 0.85 + 0.3 * sin(uTime * (6.0 + aSeed * 9.0) + aSeed * 40.0);
+      gl_PointSize = uSize * grow * flick * (3.2 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: /* glsl */`
+    precision mediump float;
+    uniform vec3 uColorA, uColorB;
+    varying float vLife;
+    varying float vSeed;
+    void main() {
+      // soft round sprite from gl_PointCoord — no texture needed
+      vec2 p = gl_PointCoord - 0.5;
+      float d = length(p) * 2.0;
+      float a = smoothstep(1.0, 0.15, d);
+      if (a < 0.01) discard;
+      vec3 col = mix(uColorA, uColorB, vSeed);
+      col += vec3(0.25) * smoothstep(0.5, 0.0, d);   // hot core
+      gl_FragColor = vec4(col, a * vLife);
+    }`
+});
+
+const points = new THREE.Points(pGeo, pMat);
+points.renderOrder = 1;
+points.frustumCulled = false;
+scene.add(points);
+
+// per-preset velocity scratch (avoid allocs in the hot loop)
+const GRAV = new THREE.Vector3();
+
+/** Spawn n particles at world position p with emitter velocity v. */
+function spawn(n, p, v) {
+  for (let k = 0; k < n; k++) {
+    const i = cursor; cursor = (cursor + 1) % COUNT;
+    const i3 = i * 3;
+    positions[i3]   = p.x + (Math.random() - 0.5) * 0.06;
+    positions[i3+1] = p.y + (Math.random() - 0.5) * 0.06;
+    positions[i3+2] = p.z + (Math.random() - 0.5) * 0.06;
+    velocities[i3]   = v.x * preset.inherit + (Math.random() - 0.5) * preset.spread;
+    velocities[i3+1] = v.y * preset.inherit + (Math.random() - 0.5) * preset.spread;
+    velocities[i3+2] = v.z * preset.inherit + (Math.random() - 0.5) * preset.spread * 0.6;
+    life[i] = 1;
+  }
+}
+
+/** CPU integration step for the whole pool. */
+function simulate(dt) {
+  GRAV.fromArray(preset.gravity);
+  const decay = dt / preset.lifetime;
+  const drag  = Math.max(0, 1 - preset.drag * dt);
+  const ta = preset.turbAmp, tf = preset.turbFreq, sw = preset.swirl;
+  const t = clock.elapsedTime;
+
+  for (let i = 0; i < COUNT; i++) {
+    if (life[i] <= 0) continue;
+    life[i] -= decay;
+    const i3 = i * 3;
+    let x = positions[i3], y = positions[i3+1], z = positions[i3+2];
+
+    // cheap sine-field turbulence (stand-in for curl noise, no lookups)
+    const s = seeds[i] * 6.28;
+    velocities[i3]   += (Math.sin(y * tf + t * 1.7 + s) * ta + GRAV.x) * dt;
+    velocities[i3+1] += (Math.sin(z * tf + t * 1.3 + s * 2.0) * ta * 0.7 + GRAV.y) * dt;
+    velocities[i3+2] += (Math.sin(x * tf + t * 2.1 + s * 3.0) * ta * 0.4 + GRAV.z) * dt;
+
+    // swirl: rotate velocity around the z axis, centered on origin
+    if (sw > 0) {
+      velocities[i3]   += -y * sw * dt;
+      velocities[i3+1] +=  x * sw * dt;
+    }
+
+    velocities[i3] *= drag; velocities[i3+1] *= drag; velocities[i3+2] *= drag;
+    positions[i3]   = x + velocities[i3]   * dt;
+    positions[i3+1] = y + velocities[i3+1] * dt;
+    positions[i3+2] = z + velocities[i3+2] * dt;
+
+    if (life[i] <= 0) positions[i3+1] = -999;  // park dead particles off-screen
+  }
+  pGeo.attributes.position.needsUpdate = true;
+  pGeo.attributes.aLife.needsUpdate = true;
+}
+
+/* ============================================================
+   SECTION: HAND TRACKING (MediaPipe Hands)
+   Fingertip landmarks (indices 4,8,12,16,20) of up to 2 hands are
+   mapped from video UV space into world space on the video plane,
+   with a z offset so emitters float IN FRONT of the image.
+   Frame-to-frame deltas give per-fingertip velocity; the average
+   speed drives emission rate and the video distortion amount.
+   ============================================================ */
+const TIP_IDS = [4, 8, 12, 16, 20];
+const video = document.getElementById('cam');
+
+// Per-hand tracked state: 5 fingertip emitters with position+velocity
+const handState = [makeHand(), makeHand()];
+function makeHand() {
+  return {
+    active: false,
+    speed: 0,                                   // smoothed avg tip speed
+    center: new THREE.Vector2(-10, -10),        // palm center in screen UV
+    tips: TIP_IDS.map(() => ({
+      pos: new THREE.Vector3(), vel: new THREE.Vector3(), seen: false
+    }))
+  };
+}
+
+// cover-crop factors, shared by the shader and the landmark mapping
+let coverX = 1, coverY = 1;
+function updateCover() {
+  if (!video.videoWidth) return;
+  const va = video.videoWidth / video.videoHeight;
+  const sa = window.innerWidth / window.innerHeight;
+  if (sa > va) { coverX = 1; coverY = va / sa; }
+  else         { coverX = sa / va; coverY = 1; }
+  videoUniforms.uCover.value.set(coverX, coverY);
+}
+
+/** video-space landmark -> world position on/near the plane. */
+function landmarkToWorld(lm, out) {
+  // invert the cover crop so fingers align with the visible video
+  let u = (lm.x - 0.5) / coverX + 0.5;
+  let v = (lm.y - 0.5) / coverY + 0.5;
+  u = 1 - u;                                    // selfie mirror
+  out.set(
+    (u - 0.5) * planeW,
+    (0.5 - v) * planeH,
+    // MediaPipe z is depth relative to the wrist (negative = closer);
+    // scale it into a band floating in front of the video plane
+    1.2 + THREE.MathUtils.clamp(-lm.z * 6, -0.6, 1.4)
+  );
+  return out;
+}
+
+let lastResultTime = 0;
+const _w = new THREE.Vector3();
+
+function onHandResults(results) {
+  const now = performance.now();
+  const dt = Math.min((now - lastResultTime) / 1000, 0.2) || 0.033;
+  lastResultTime = now;
+
+  handState.forEach(h => h.active = false);
+  const lists = results.multiHandLandmarks || [];
+
+  for (let hi = 0; hi < Math.min(lists.length, 2); hi++) {
+    const lm = lists[hi];
+    const hand = handState[hi];
+    hand.active = true;
+
+    let speedSum = 0;
+    for (let ti = 0; ti < TIP_IDS.length; ti++) {
+      const tip = hand.tips[ti];
+      landmarkToWorld(lm[TIP_IDS[ti]], _w);
+      if (tip.seen) {
+        // velocity = world-space delta / dt (drives trails + inherit)
+        tip.vel.subVectors(_w, tip.pos).divideScalar(dt);
+        // guard against tracking jumps
+        if (tip.vel.length() > 30) tip.vel.setLength(30);
+      } else {
+        tip.vel.set(0, 0, 0);
+      }
+      tip.pos.copy(_w);
+      tip.seen = true;
+      speedSum += tip.vel.length();
+    }
+    // smooth the speed so distortion breathes instead of flickering
+    const target = speedSum / TIP_IDS.length;
+    hand.speed += (target - hand.speed) * 0.35;
+
+    // palm center (landmark 9 = middle finger MCP) in SCREEN uv space,
+    // for the ripple origin in the video shader
+    let u = 1 - ((lm[9].x - 0.5) / coverX + 0.5);
+    let v = 1 - ((lm[9].y - 0.5) / coverY + 0.5); // shader uv y is up
+    hand.center.set(u, v);
+  }
+
+  handState.forEach(h => {
+    if (!h.active) { h.tips.forEach(t => t.seen = false); h.speed *= 0.9; }
+  });
+  modelReady = true;
+}
+
+let hands = null;
+let modelReady = false;
+let detecting = false;
+let lastDetect = 0;
+const DETECT_INTERVAL = 1000 / 30;   // cap detection at 30 Hz to save GPU
+
+async function detectLoop() {
+  // gate: don't overlap async sends, don't exceed 30 Hz
+  const now = performance.now();
+  if (hands && !detecting && video.readyState >= 2 && now - lastDetect >= DETECT_INTERVAL) {
+    detecting = true;
+    lastDetect = now;
+    try { await hands.send({ image: video }); } catch (e) { /* transient */ }
+    detecting = false;
+  }
+  requestAnimationFrame(detectLoop);
+}
+
+/* ============================================================
+   SECTION: POINTER FALLBACK
+   No hands detected (or desktop testing)? Touch / mouse drag acts
+   as a single emitter so the page is never a black box.
+   ============================================================ */
+const pointer = { active: false, pos: new THREE.Vector3(), vel: new THREE.Vector3(), last: new THREE.Vector3(), t: 0 };
+function pointerToWorld(e, out) {
+  out.set(
+    (e.clientX / window.innerWidth - 0.5) * planeW,
+    (0.5 - e.clientY / window.innerHeight) * planeH,
+    1.4
+  );
+}
+window.addEventListener('pointerdown', e => {
+  if (e.target.closest('button')) return;      // don't emit from UI taps
+  pointer.active = true;
+  pointerToWorld(e, pointer.pos); pointer.last.copy(pointer.pos);
+  pointer.t = performance.now();
+});
+window.addEventListener('pointermove', e => {
+  if (!pointer.active) return;
+  const now = performance.now();
+  const dt = Math.max((now - pointer.t) / 1000, 1e-3);
+  pointer.t = now;
+  pointerToWorld(e, pointer.pos);
+  pointer.vel.subVectors(pointer.pos, pointer.last).divideScalar(dt);
+  if (pointer.vel.length() > 30) pointer.vel.setLength(30);
+  pointer.last.copy(pointer.pos);
+});
+window.addEventListener('pointerup',   () => pointer.active = false);
+window.addEventListener('pointercancel',() => pointer.active = false);
+
+/* ============================================================
+   SECTION: EMISSION + GLOBAL DISTORTION
+   Called once per rendered frame: spends the emission budget at
+   every active fingertip (rate scales with movement speed) and
+   eases the global distortion uniform toward total hand energy.
+   ============================================================ */
+let emitAcc = 0;   // fractional-particle accumulator
+
+function emit(dt) {
+  let totalSpeed = 0, anyHand = false;
+
+  for (const hand of handState) {
+    if (!hand.active) continue;
+    anyHand = true;
+    totalSpeed += hand.speed;
+    for (const tip of hand.tips) {
+      const rate = preset.birthRate + tip.vel.length() * preset.speedBoost;
+      emitAcc += rate * dt;
+      const n = Math.floor(emitAcc);
+      if (n > 0) { emitAcc -= n; spawn(Math.min(n, 40), tip.pos, tip.vel); }
+    }
+  }
+
+  // fallback emitter when no hands are tracked
+  if (!anyHand && pointer.active) {
+    totalSpeed = pointer.vel.length() * 0.6;
+    emitAcc += (preset.birthRate * 2 + pointer.vel.length() * preset.speedBoost) * dt;
+    const n = Math.floor(emitAcc);
+    if (n > 0) { emitAcc -= n; spawn(Math.min(n, 60), pointer.pos, pointer.vel); }
+  }
+
+  // hand speed -> normalized distortion, eased for a liquid feel
+  const target = THREE.MathUtils.clamp(totalSpeed * 0.09 * preset.distortion, 0, 1.2);
+  videoUniforms.uDistortion.value += (target - videoUniforms.uDistortion.value) * (target > videoUniforms.uDistortion.value ? 0.25 : 0.05);
+
+  // feed per-hand ripple centers + strengths to the video shader
+  for (let i = 0; i < 2; i++) {
+    const h = handState[i];
+    const u = videoUniforms.uHands.value[i];
+    if (h.active) u.set(h.center.x, h.center.y, Math.min(h.speed * 0.12 * preset.distortion, 1));
+    else if (i === 0 && pointer.active) {
+      u.set(pointer.pos.x / planeW + 0.5, pointer.pos.y / planeH + 0.5,
+            Math.min(pointer.vel.length() * 0.08 * preset.distortion, 1));
+    } else u.z *= 0.9;   // fade ripple out when the hand disappears
+  }
+}
+
+/* ============================================================
+   SECTION: MAIN LOOP
+   Simulate -> emit -> subtle camera parallax -> render.
+   ============================================================ */
+const clock = new THREE.Clock();
+let frames = 0, fpsTime = 0;
+const hud = document.getElementById('hud');
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);   // clamp tab-switch spikes
+  const t = clock.elapsedTime;
+
+  emit(dt);
+  simulate(dt);
+
+  // gentle camera drift + lean toward hand activity = real parallax
+  const lean = videoUniforms.uDistortion.value;
+  camera.position.x = Math.sin(t * 0.31) * 0.07 + Math.sin(t * 1.7) * 0.015 * lean;
+  camera.position.y = Math.cos(t * 0.23) * 0.05;
+  camera.lookAt(0, 0, 0.8);
+
+  videoUniforms.uTime.value = t;
+  particleUniforms.uTime.value = t;
+
+  renderer.render(scene, camera);
+
+  // FPS readout (1s window)
+  frames++; fpsTime += dt;
+  if (fpsTime >= 1) {
+    hud.textContent = `${frames} fps · ${handState.filter(h => h.active).length} hand(s)`;
+    frames = 0; fpsTime = 0;
+  }
+}
+
+/* ============================================================
+   SECTION: RESIZE — size the plane to exactly fill the frustum
+   ============================================================ */
+function resize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  // frustum height at z=0 given camera at CAM_Z
+  planeH = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * CAM_Z;
+  planeW = planeH * camera.aspect;
+  videoPlane.scale.set(planeW * 1.06, planeH * 1.06, 1); // 6% bleed hides ripple edges
+  updateCover();
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 300));
+resize();
+
+/* ============================================================
+   SECTION: UI — presets + fullscreen
+   ============================================================ */
+function applyPreset(name) {
+  preset = PRESETS[name];
+  particleUniforms.uSize.value = preset.size;
+  particleUniforms.uColorA.value.set(preset.colorA);
+  particleUniforms.uColorB.value.set(preset.colorB);
+  videoUniforms.uRGBShift.value = preset.rgbShift;
+  videoUniforms.uGlitch.value   = preset.glitch;
+  videoUniforms.uScanline.value = preset.scanline;
+  videoUniforms.uDim.value      = preset.dim;
+  document.querySelectorAll('.preset').forEach(b =>
+    b.classList.toggle('active', b.dataset.preset === name));
+}
+document.querySelectorAll('.preset').forEach(b =>
+  b.addEventListener('click', () => applyPreset(b.dataset.preset)));
+
+// Fullscreen: standard API where available; iPhone Safari has none,
+// so fall back to "pseudo-fullscreen" (hide the UI chrome).
+document.getElementById('fsBtn').addEventListener('click', () => {
+  const el = document.documentElement;
+  if (document.fullscreenElement || document.webkitFullscreenElement) {
+    (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+  } else if (el.requestFullscreen) {
+    el.requestFullscreen().catch(() => document.body.classList.toggle('pseudo-fs'));
+  } else if (el.webkitRequestFullscreen) {
+    el.webkitRequestFullscreen();
+  } else {
+    document.body.classList.toggle('pseudo-fs');
+  }
+});
+
+/* ============================================================
+   SECTION: STARTUP
+   iOS requires a user gesture before getUserMedia, so everything
+   kicks off from the Start button: camera -> MediaPipe -> loops.
+   ============================================================ */
+const overlay = document.getElementById('overlay');
+const statusEl = document.getElementById('status');
+const setStatus = s => statusEl.textContent = s;
+
+document.getElementById('startBtn').addEventListener('click', async () => {
+  try {
+    setStatus('Requesting camera…');
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error('Camera API unavailable. This page must be served over HTTPS.');
+    }
+    // front camera, modest resolution — MediaPipe doesn't need more
+    // and small frames keep the iPhone GPU inside the 30fps budget
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
+    });
+    video.srcObject = stream;
+    await video.play();
+    updateCover();
+
+    setStatus('Loading hand-tracking model…');
+    hands = new Hands({
+      locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}`
+    });
+    hands.setOptions({
+      maxNumHands: 2,
+      modelComplexity: 0,          // "lite" model — the mobile-friendly one
+      minDetectionConfidence: 0.6,
+      minTrackingConfidence: 0.5
+    });
+    hands.onResults(onHandResults);
+
+    detectLoop();                  // hand detection @ ≤30 Hz
+    animate();                     // render loop @ display rate
+
+    // hide the overlay on the first successful inference (model warm)
+    const waitReady = setInterval(() => {
+      if (modelReady) {
+        clearInterval(waitReady);
+        overlay.classList.add('hidden');
+      }
+    }, 100);
+    // …but never trap the user: bail out after 12s and start anyway
+    setTimeout(() => { clearInterval(waitReady); overlay.classList.add('hidden'); }, 12000);
+  } catch (err) {
+    setStatus(err.name === 'NotAllowedError'
+      ? 'Camera permission denied — allow it in Settings ▸ Safari ▸ Camera.'
+      : `Error: ${err.message}`);
+  }
+});
+</script>
+
+<!-- ============================================================
+     HOSTING NOTE
+     iOS Safari only exposes the camera on secure origins:
+       * GitHub Pages (easiest): push this repo, then Settings ▸
+         Pages ▸ deploy from branch. Your site gets HTTPS for free
+         at https://<user>.github.io/<repo>/ — open it on the phone.
+       * Local dev: `npx serve` or `python3 -m http.server` works on
+         http://localhost (secure-context exempt) for desktop, but a
+         PHONE needs HTTPS — use GitHub Pages, or a tunnel like
+         `npx ngrok http 8000` / `cloudflared tunnel`.
+       * Just double-clicking the file (file://) will NOT get camera
+         access, and the CDN libraries need network anyway.
+     ============================================================ -->
+</body>
+</html>
