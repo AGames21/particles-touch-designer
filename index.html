@@ -2,17 +2,20 @@
 <html lang="en">
 <head>
 <!-- ============================================================
-     HAND PARTICLES + CAMERA DISTORTION — v1.0
+     HAND PARTICLES + CAMERA DISTORTION — v1.1
      Single-file interactive experience:
        * MediaPipe Hands  -> fingertip tracking (both hands)
        * Three.js         -> GPU particle system (Points + custom shaders)
        * Custom GLSL      -> live camera feed with ripple / glitch distortion
        * 5 presets        -> Fire, Glitch, Galaxy, Chrome, Neon
+     v1.1: deeper 3D — ambient dust field with parallax, hand-driven
+     camera moves, depth fog on particles, continuous fingertip trails,
+     hand glow halos, film grain, preset-tinted UI.
      Mobile-first: iOS Safari, front camera, portrait, 30fps target.
      HTTPS is required for camera access (see README / note at bottom).
      ============================================================ -->
 <meta charset="utf-8">
-<title>Hand Particles v1.0</title>
+<title>Hand Particles v1.1</title>
 <!-- viewport-fit=cover -> draw under the iPhone notch; no zoom gestures -->
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -87,8 +90,12 @@ html, body {
   padding: 9px 12px; cursor: pointer;
   white-space: nowrap;
 }
+/* active preset takes on the preset's own accent color (set from JS) */
 .preset.active {
-  color: #000; background: #fff; border-color: #fff;
+  color: #000;
+  background: var(--accent, #fff);
+  border-color: var(--accent, #fff);
+  box-shadow: 0 0 18px var(--accent, rgba(255,255,255,.5));
 }
 .preset:active { transform: scale(.95); }
 
@@ -273,7 +280,8 @@ const videoUniforms = {
   uRGBShift:   { value: preset.rgbShift },
   uGlitch:     { value: preset.glitch },
   uScanline:   { value: preset.scanline },
-  uDim:        { value: preset.dim }
+  uDim:        { value: preset.dim },
+  uGlowColor:  { value: new THREE.Color(preset.colorA) }   // hand halo tint
 };
 
 const videoMat = new THREE.ShaderMaterial({
@@ -292,6 +300,7 @@ const videoMat = new THREE.ShaderMaterial({
     uniform float uTime, uDistortion, uRGBShift, uGlitch, uScanline, uDim;
     uniform vec2  uCover;
     uniform vec3  uHands[2];
+    uniform vec3  uGlowColor;
 
     // cheap hash noise (no texture lookups — iOS-safe, WebGL1-safe)
     float hash(float n) { return fract(sin(n) * 43758.5453123); }
@@ -330,12 +339,21 @@ const videoMat = new THREE.ShaderMaterial({
       col.g = texture2D(uTex, suv).g;
       col.b = texture2D(uTex, suv - vec2( sh, 0.0)).b;
 
-      // --- 5. scanlines, vignette, dim ---
+      // --- 5. energy halo around each hand, tinted by the preset ---
+      for (int i = 0; i < 2; i++) {
+        vec3 h = uHands[i];
+        if (h.z <= 0.001) continue;
+        float d = distance(vUv, h.xy);
+        col += uGlowColor * exp(-d * 6.0) * h.z * 0.55;
+      }
+
+      // --- 6. scanlines, film grain, vignette, dim ---
       if (uScanline > 0.001) {
         col *= 1.0 - uScanline * 0.18 * (0.5 + 0.5 * sin(vUv.y * 700.0));
       }
+      col += (hash(vUv.x * 387.31 + vUv.y * 941.71 + fract(uTime) * 173.0) - 0.5) * 0.055;
       float vig = smoothstep(1.25, 0.35, length(vUv - 0.5));
-      col *= mix(0.4, 1.0, vig);
+      col *= mix(0.35, 1.0, vig);
       col *= (1.0 - uDim * 0.6);
 
       gl_FragColor = vec4(col, 1.0);
@@ -388,10 +406,12 @@ const pMat = new THREE.ShaderMaterial({
     uniform float uSize, uTime;
     varying float vLife;
     varying float vSeed;
+    varying float vDepth;
     void main() {
       vLife = aLife;
       vSeed = aSeed;
       vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vDepth = -mv.z;                    // camera-space distance for fog
       // pop in fast, shrink out — and perspective size attenuation
       float grow = smoothstep(0.0, 0.15, 1.0 - aLife) * aLife;
       // subtle per-particle flicker
@@ -404,15 +424,23 @@ const pMat = new THREE.ShaderMaterial({
     uniform vec3 uColorA, uColorB;
     varying float vLife;
     varying float vSeed;
+    varying float vDepth;
     void main() {
       // soft round sprite from gl_PointCoord — no texture needed
       vec2 p = gl_PointCoord - 0.5;
       float d = length(p) * 2.0;
       float a = smoothstep(1.0, 0.15, d);
       if (a < 0.01) discard;
-      vec3 col = mix(uColorA, uColorB, vSeed);
-      col += vec3(0.25) * smoothstep(0.5, 0.0, d);   // hot core
-      gl_FragColor = vec4(col, a * vLife);
+      // color evolves over lifetime (born hot as A, cools toward B),
+      // with per-particle variation from the seed
+      vec3 col = mix(uColorB, uColorA, vLife);
+      col = mix(col, mix(uColorA, uColorB, vSeed), 0.35);
+      col += vec3(0.3) * smoothstep(0.5, 0.0, d) * vLife;   // hot core
+      // depth cues: particles near the camera glow brighter, far ones
+      // sink into fog — this is what sells the "in between" 3D feel
+      float nearBoost = 0.65 + smoothstep(5.5, 1.2, vDepth) * 0.8;
+      float fog = smoothstep(7.5, 4.8, vDepth);
+      gl_FragColor = vec4(col * nearBoost, a * vLife * fog);
     }`
 });
 
@@ -424,14 +452,18 @@ scene.add(points);
 // per-preset velocity scratch (avoid allocs in the hot loop)
 const GRAV = new THREE.Vector3();
 
-/** Spawn n particles at world position p with emitter velocity v. */
-function spawn(n, p, v) {
+/** Spawn n particles at world position p with emitter velocity v.
+    Each particle is placed a random fraction back along the emitter's
+    motion over the last frame (backDt), so a fast-moving fingertip
+    leaves a continuous ribbon of particles instead of clumped bursts. */
+function spawn(n, p, v, backDt = 0) {
   for (let k = 0; k < n; k++) {
     const i = cursor; cursor = (cursor + 1) % COUNT;
     const i3 = i * 3;
-    positions[i3]   = p.x + (Math.random() - 0.5) * 0.06;
-    positions[i3+1] = p.y + (Math.random() - 0.5) * 0.06;
-    positions[i3+2] = p.z + (Math.random() - 0.5) * 0.06;
+    const back = Math.random() * backDt;
+    positions[i3]   = p.x - v.x * back + (Math.random() - 0.5) * 0.06;
+    positions[i3+1] = p.y - v.y * back + (Math.random() - 0.5) * 0.06;
+    positions[i3+2] = p.z - v.z * back + (Math.random() - 0.5) * 0.12;
     velocities[i3]   = v.x * preset.inherit + (Math.random() - 0.5) * preset.spread;
     velocities[i3+1] = v.y * preset.inherit + (Math.random() - 0.5) * preset.spread;
     velocities[i3+2] = v.z * preset.inherit + (Math.random() - 0.5) * preset.spread * 0.6;
@@ -475,6 +507,71 @@ function simulate(dt) {
   pGeo.attributes.position.needsUpdate = true;
   pGeo.attributes.aLife.needsUpdate = true;
 }
+
+/* ============================================================
+   SECTION: AMBIENT DUST FIELD
+   A sparse cloud of slow, dim motes spread through the whole depth
+   range (behind AND in front of the video plane). It costs almost
+   nothing, but because the camera sways, the relative drift between
+   near and far motes gives the scene constant, readable 3D depth —
+   even before a hand shows up.
+   ============================================================ */
+const DUST = isMobile ? 350 : 800;
+const dustPos  = new Float32Array(DUST * 3);
+const dustSeed = new Float32Array(DUST);
+for (let i = 0; i < DUST; i++) {
+  dustPos[i*3]   = (Math.random() - 0.5) * 9;
+  dustPos[i*3+1] = (Math.random() - 0.5) * 12;
+  dustPos[i*3+2] = -1.2 + Math.random() * 4.6;   // z ∈ [-1.2, 3.4]
+  dustSeed[i] = Math.random();
+}
+const dustGeo = new THREE.BufferGeometry();
+dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+dustGeo.setAttribute('aSeed',    new THREE.BufferAttribute(dustSeed, 1));
+dustGeo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 100);
+
+const dustUniforms = {
+  uTime:  { value: 0 },
+  uColor: { value: new THREE.Color(preset.colorA) }
+};
+const dustMat = new THREE.ShaderMaterial({
+  uniforms: dustUniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: /* glsl */`
+    attribute float aSeed;
+    uniform float uTime;
+    varying float vSeed;
+    void main() {
+      vSeed = aSeed;
+      vec3 p = position;
+      // slow individual drift so the field feels alive, not frozen
+      p.x += sin(uTime * 0.11 + aSeed * 40.0) * 0.35;
+      p.y += uTime * (0.02 + aSeed * 0.05);            // gentle rise...
+      p.y = mod(p.y + 6.0, 12.0) - 6.0;                // ...with wraparound
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float tw = 0.6 + 0.4 * sin(uTime * (0.7 + aSeed * 2.0) + aSeed * 90.0);
+      gl_PointSize = (4.0 + aSeed * 9.0) * tw * (3.2 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: /* glsl */`
+    precision mediump float;
+    uniform vec3 uColor;
+    varying float vSeed;
+    void main() {
+      vec2 p = gl_PointCoord - 0.5;
+      float a = smoothstep(1.0, 0.1, length(p) * 2.0);
+      if (a < 0.01) discard;
+      // desaturate toward white a touch so dust reads as atmosphere
+      vec3 col = mix(uColor, vec3(1.0), 0.45);
+      gl_FragColor = vec4(col, a * (0.10 + vSeed * 0.14));
+    }`
+});
+const dust = new THREE.Points(dustGeo, dustMat);
+dust.renderOrder = 1;
+dust.frustumCulled = false;
+scene.add(dust);
 
 /* ============================================================
    SECTION: HAND TRACKING (MediaPipe Hands)
@@ -521,8 +618,9 @@ function landmarkToWorld(lm, out) {
     (u - 0.5) * planeW,
     (0.5 - v) * planeH,
     // MediaPipe z is depth relative to the wrist (negative = closer);
-    // scale it into a band floating in front of the video plane
-    1.2 + THREE.MathUtils.clamp(-lm.z * 6, -0.6, 1.4)
+    // scale it into a generous band floating in front of the video
+    // plane so pushing a hand toward the camera really reads in 3D
+    1.3 + THREE.MathUtils.clamp(-lm.z * 9, -0.9, 2.0)
   );
   return out;
 }
@@ -645,7 +743,8 @@ function emit(dt) {
       const rate = preset.birthRate + tip.vel.length() * preset.speedBoost;
       emitAcc += rate * dt;
       const n = Math.floor(emitAcc);
-      if (n > 0) { emitAcc -= n; spawn(Math.min(n, 40), tip.pos, tip.vel); }
+      // backDt ≈ one tracking frame: smears spawns along the motion path
+      if (n > 0) { emitAcc -= n; spawn(Math.min(n, 40), tip.pos, tip.vel, 0.034); }
     }
   }
 
@@ -654,7 +753,7 @@ function emit(dt) {
     totalSpeed = pointer.vel.length() * 0.6;
     emitAcc += (preset.birthRate * 2 + pointer.vel.length() * preset.speedBoost) * dt;
     const n = Math.floor(emitAcc);
-    if (n > 0) { emitAcc -= n; spawn(Math.min(n, 60), pointer.pos, pointer.vel); }
+    if (n > 0) { emitAcc -= n; spawn(Math.min(n, 60), pointer.pos, pointer.vel, dt); }
   }
 
   // hand speed -> normalized distortion, eased for a liquid feel
@@ -680,6 +779,8 @@ function emit(dt) {
 const clock = new THREE.Clock();
 let frames = 0, fpsTime = 0;
 const hud = document.getElementById('hud');
+const focus = new THREE.Vector3();     // smoothed hand centroid (world)
+const _avg  = new THREE.Vector3();
 
 function animate() {
   requestAnimationFrame(animate);
@@ -689,14 +790,28 @@ function animate() {
   emit(dt);
   simulate(dt);
 
-  // gentle camera drift + lean toward hand activity = real parallax
+  // --- camera parallax ---
+  // The camera counter-moves against the (smoothed) hand position, so
+  // near particles and dust slide across the video plane behind them:
+  // that relative motion is what makes the depth unmistakable.
+  _avg.set(0, 0, 0);
+  let nActive = 0;
+  for (const h of handState) {
+    if (h.active) { _avg.add(h.tips[1].pos); nActive++; }   // index fingertip
+  }
+  if (!nActive && pointer.active) { _avg.copy(pointer.pos); nActive = 1; }
+  if (nActive) _avg.divideScalar(nActive); else _avg.set(0, 0, 1.3);
+  focus.lerp(_avg, 1 - Math.exp(-3 * dt));       // framerate-independent ease
+
   const lean = videoUniforms.uDistortion.value;
-  camera.position.x = Math.sin(t * 0.31) * 0.07 + Math.sin(t * 1.7) * 0.015 * lean;
-  camera.position.y = Math.cos(t * 0.23) * 0.05;
-  camera.lookAt(0, 0, 0.8);
+  camera.position.x = Math.sin(t * 0.31) * 0.10 + Math.sin(t * 1.7) * 0.02 * lean
+                      - focus.x * 0.10;
+  camera.position.y = Math.cos(t * 0.23) * 0.07 - focus.y * 0.07;
+  camera.lookAt(focus.x * 0.12, focus.y * 0.09, 0.8);
 
   videoUniforms.uTime.value = t;
   particleUniforms.uTime.value = t;
+  dustUniforms.uTime.value = t;
 
   renderer.render(scene, camera);
 
@@ -738,9 +853,15 @@ function applyPreset(name) {
   videoUniforms.uGlitch.value   = preset.glitch;
   videoUniforms.uScanline.value = preset.scanline;
   videoUniforms.uDim.value      = preset.dim;
+  videoUniforms.uGlowColor.value.set(preset.colorA);
+  dustUniforms.uColor.value.set(preset.colorA);
+  // tint the UI with the preset's accent color
+  document.documentElement.style.setProperty(
+    '--accent', '#' + new THREE.Color(preset.colorA).getHexString());
   document.querySelectorAll('.preset').forEach(b =>
     b.classList.toggle('active', b.dataset.preset === name));
 }
+applyPreset('fire');   // sync UI accent on load
 document.querySelectorAll('.preset').forEach(b =>
   b.addEventListener('click', () => applyPreset(b.dataset.preset)));
 
