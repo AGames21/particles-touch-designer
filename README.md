@@ -7,7 +7,14 @@ Move your hands in front of the front camera: particles trail off your fingertip
 displacement shader driven by hand movement speed. Five presets (Fire, Glitch,
 Galaxy, Chrome, Neon) swap live via config objects — no reload.
 
-## How to host
+## Live site
+
+**https://agames21.github.io/particles-touch-designer/** — open it on your phone.
+
+Deploys are automatic: every push to `main` runs a workflow that syncs the branch
+to `gh-pages`, which GitHub Pages serves.
+
+## How to host (if setting up elsewhere)
 
 iOS Safari only allows camera access on **HTTPS** origins, so:
 

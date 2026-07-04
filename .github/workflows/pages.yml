@@ -1,6 +1,8 @@
-# Deploy the site to GitHub Pages on every push to main.
-# `enablement: true` lets the workflow create/enable the Pages site itself,
-# so no manual Settings ▸ Pages step is needed.
+# Publish to GitHub Pages by syncing main -> gh-pages on every push.
+# The Pages site is configured to serve the gh-pages branch, and GitHub's
+# built-in "pages build and deployment" picks up each sync automatically.
+# (This route needs only `contents: write`, which the default workflow
+# token has — unlike the Actions-source Pages API, which needs admin.)
 name: Deploy to GitHub Pages
 
 on:
@@ -9,9 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
 
 concurrency:
   group: pages
@@ -20,16 +20,7 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/configure-pages@v5
-        with:
-          enablement: true
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: .
-      - id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Push main snapshot to gh-pages
+        run: git push --force origin HEAD:gh-pages
