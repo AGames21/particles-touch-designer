@@ -11,6 +11,12 @@ Galaxy, Chrome, Neon) swap live via config objects — no reload.
 
 **https://agames21.github.io/particles-touch-designer/** — open it on your phone.
 
+**🎮 Game:** [Slice Ninja](https://agames21.github.io/particles-touch-designer/game.html)
+(`game.html`) — Fruit-Ninja-style: slice neon orbs with fast hand swipes, dodge the
+red bombs (they glitch the whole feed), chain combos up to 5x. 60-second rounds,
+best score saved on-device. Built on the same engine; the 🎮 button on the main
+page links to it.
+
 Deploys are automatic: every push to `main` runs a workflow that syncs the branch
 to `gh-pages`, which GitHub Pages serves.
 
