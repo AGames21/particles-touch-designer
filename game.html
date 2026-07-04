@@ -2,20 +2,21 @@
 <html lang="en">
 <head>
 <!-- ============================================================
-     HAND PARTICLES + CAMERA DISTORTION — v1.1
-     Single-file interactive experience:
-       * MediaPipe Hands  -> fingertip tracking (both hands)
-       * Three.js         -> GPU particle system (Points + custom shaders)
-       * Custom GLSL      -> live camera feed with ripple / glitch distortion
-       * 5 presets        -> Fire, Glitch, Galaxy, Chrome, Neon
-     v1.1: deeper 3D — ambient dust field with parallax, hand-driven
-     camera moves, depth fog on particles, continuous fingertip trails,
-     hand glow halos, film grain, preset-tinted UI.
+     SLICE NINJA — v1.0  (built on the Hand Particles engine v1.1)
+     Fruit-Ninja-style game played with your bare hands in AR:
+       * Neon orbs arc up through 3D space between you and the camera
+       * Slice them with fast fingertip swipes — your particle trail
+         IS the blade (slices need real hand speed, not just touching)
+       * Avoid the pulsing red BOMBS — they cost points and glitch
+         the whole video feed as damage feedback
+       * Combo chain: keep slicing without a gap for up to 5x score
+       * 60-second rounds, best score saved on-device
+     Engine underneath is identical to index.html: MediaPipe Hands,
+     Three.js particle pool, GLSL video distortion, 5 visual presets.
      Mobile-first: iOS Safari, front camera, portrait, 30fps target.
-     HTTPS is required for camera access (see README / note at bottom).
      ============================================================ -->
 <meta charset="utf-8">
-<title>Hand Particles v1.1</title>
+<title>Slice Ninja v1.0</title>
 <!-- viewport-fit=cover -> draw under the iPhone notch; no zoom gestures -->
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -115,34 +116,90 @@ html, body {
 #fsBtn svg { width: 18px; height: 18px; }
 #fsBtn:active { transform: scale(.92); }
 
-/* --- link to the Slice Ninja game (left of the fullscreen button) --- */
-#gameLink {
-  position: fixed; z-index: 20;
-  top: calc(10px + env(safe-area-inset-top));
-  right: calc(58px + env(safe-area-inset-right));
-  height: 40px; display: flex; align-items: center;
-  font-size: 12px; font-weight: 600; text-decoration: none;
-  color: rgba(255,255,255,.8);
-  background: rgba(20,20,28,.55);
-  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
-  border: 1px solid rgba(255,255,255,.14);
-  border-radius: 12px; padding: 0 12px;
-}
-#gameLink:active { transform: scale(.95); }
-
 /* Pseudo-fullscreen fallback (iPhone Safari has no Fullscreen API):
    we just hide the UI chrome so only the canvas remains. */
 body.pseudo-fs #presets { opacity: 0; pointer-events: none; }
 #presets { transition: opacity .3s ease; }
 
-/* --- tiny FPS/debug readout, top-left --- */
+/* --- tiny FPS/debug readout, moved to bottom-left (HUD owns the top) --- */
 #hud {
   position: fixed; z-index: 20;
-  top: calc(14px + env(safe-area-inset-top));
+  bottom: calc(58px + env(safe-area-inset-bottom));
   left: calc(12px + env(safe-area-inset-left));
-  font-size: 10px; color: rgba(255,255,255,.4);
+  font-size: 10px; color: rgba(255,255,255,.35);
   font-variant-numeric: tabular-nums;
   pointer-events: none;
+}
+
+/* ============================================================
+   SECTION: GAME CSS — score/timer HUD, popups, results screen
+   ============================================================ */
+#gamehud {
+  position: fixed; z-index: 20;
+  top: calc(10px + env(safe-area-inset-top));
+  left: calc(14px + env(safe-area-inset-left));
+  right: calc(60px + env(safe-area-inset-right));
+  display: flex; align-items: flex-start; justify-content: space-between;
+  pointer-events: none;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 1px 8px rgba(0,0,0,.8);
+}
+#score  { font-size: 26px; font-weight: 800; letter-spacing: .02em; }
+#combo  {
+  font-size: 13px; font-weight: 700; min-height: 17px;
+  color: var(--accent, #fff);
+  transition: transform .12s ease;
+}
+#combo.bump { transform: scale(1.35); }
+#timer  { font-size: 26px; font-weight: 800; }
+#timer.low { color: #ff5252; animation: tick .5s infinite alternate; }
+@keyframes tick { from { opacity: 1; } to { opacity: .45; } }
+
+/* floating "+10" score popups, spawned/removed from JS */
+.pop {
+  position: fixed; z-index: 21;
+  transform: translate(-50%, -50%);
+  font-size: 20px; font-weight: 800; color: var(--accent, #fff);
+  text-shadow: 0 0 12px var(--accent, #fff), 0 1px 4px rgba(0,0,0,.7);
+  pointer-events: none;
+  animation: popfly .8s ease-out forwards;
+}
+.pop.bad { color: #ff5252; text-shadow: 0 0 12px #ff5252; }
+@keyframes popfly {
+  0%   { opacity: 0; transform: translate(-50%,-50%) scale(.4); }
+  15%  { opacity: 1; transform: translate(-50%,-60%) scale(1.15); }
+  100% { opacity: 0; transform: translate(-50%,-180%) scale(1); }
+}
+
+/* results screen (reuses the overlay look) */
+#results {
+  position: fixed; inset: 0; z-index: 29;
+  display: none; flex-direction: column;
+  align-items: center; justify-content: center;
+  background: rgba(4,6,14,.78);
+  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+  color: #fff; text-align: center; padding: 24px;
+}
+#results.show { display: flex; }
+#results h2 { font-size: 18px; font-weight: 700; opacity: .7; margin: 0; letter-spacing: .1em; }
+#finalScore { font-size: 64px; font-weight: 800; margin: 6px 0 2px; color: var(--accent, #fff);
+              text-shadow: 0 0 30px var(--accent, #fff); }
+#bestScore  { font-size: 14px; opacity: .65; margin: 0 0 30px; }
+#againBtn {
+  font-size: 17px; font-weight: 600; color: #000;
+  background: var(--accent, #fff); border: none; border-radius: 999px;
+  padding: 14px 44px; cursor: pointer;
+  box-shadow: 0 0 24px var(--accent, rgba(255,255,255,.5));
+}
+#againBtn:active { transform: scale(.96); }
+
+/* link back to the free-play toy (lives on the results screen) */
+#toyLink {
+  margin-top: 16px; font-size: 13px; font-weight: 600;
+  color: rgba(255,255,255,.55); text-decoration: none;
+  border-bottom: 1px solid rgba(255,255,255,.25);
+  padding-bottom: 1px;
 }
 </style>
 </head>
@@ -155,10 +212,28 @@ body.pseudo-fs #presets { opacity: 0; pointer-events: none; }
 <video id="cam" autoplay muted playsinline></video>
 
 <div id="overlay">
-  <h1>HAND&nbsp;PARTICLES</h1>
-  <p>Allow camera access, then move your hands in front of the front camera. Particles trail off your fingertips and warp the video.</p>
-  <button id="startBtn">Tap to start</button>
+  <h1>SLICE&nbsp;NINJA</h1>
+  <p>Slice the glowing orbs with <b>fast</b> hand swipes — slow touches don't cut. Avoid the red bombs. 60 seconds, best combo wins.</p>
+  <button id="startBtn">Tap to play</button>
   <div id="status"></div>
+</div>
+
+<!-- in-round HUD: score + combo on the left, countdown on the right -->
+<div id="gamehud" style="display:none">
+  <div>
+    <div id="score">0</div>
+    <div id="combo"></div>
+  </div>
+  <div id="timer">60</div>
+</div>
+
+<!-- end-of-round results -->
+<div id="results">
+  <h2>TIME'S UP</h2>
+  <div id="finalScore">0</div>
+  <p id="bestScore"></p>
+  <button id="againBtn">Play again</button>
+  <a id="toyLink" href="index.html">← free-play mode</a>
 </div>
 
 <div id="presets">
@@ -168,8 +243,6 @@ body.pseudo-fs #presets { opacity: 0; pointer-events: none; }
   <button class="preset" data-preset="chrome">🫧 Chrome</button>
   <button class="preset" data-preset="neon">⚡ Neon</button>
 </div>
-
-<a id="gameLink" href="game.html">🎮 Game</a>
 
 <button id="fsBtn" aria-label="Fullscreen">
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -591,6 +664,287 @@ dust.frustumCulled = false;
 scene.add(dust);
 
 /* ============================================================
+   SECTION: GAME — ORBS, SLICING, SCORE, SOUND
+   Slice Ninja layer on top of the engine. Orbs are a small pool of
+   fresnel-shaded meshes launched in gravity arcs at random depths.
+   A "slice" = a fingertip segment (pos -> pos - vel*dt) passing
+   within an orb's radius WHILE the tip is moving fast — so you have
+   to swipe, not just touch. Bursts reuse the main particle pool.
+   ============================================================ */
+const G = {
+  state: 'idle',            // idle -> playing -> over
+  score: 0, combo: 0, comboTimer: 0,
+  timeLeft: 60, spawnTimer: 1, elapsed: 0,
+  glitchKick: 0,            // bomb-hit shock fed into the video shader
+  lastTick: -1,
+  sliceSpeed: 2.6           // min tip speed to cut (tunable difficulty)
+};
+const ROUND_SECONDS = 60;
+const COMBO_WINDOW  = 1.5;                       // s between slices to chain
+const best = () => Number(localStorage.getItem('sliceninja-best') || 0);
+
+// --- orb pool -------------------------------------------------
+const ORB_POOL = 10;
+const orbGeo = new THREE.IcosahedronGeometry(0.26, 1);
+function makeOrbMaterial() {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uColor: { value: new THREE.Color(1, 1, 1) },
+      uTime:  { value: 0 },
+      uPulse: { value: 0 }               // 1 = bomb warning pulse
+    },
+    transparent: true,
+    vertexShader: /* glsl */`
+      varying vec3 vN, vV;
+      void main() {
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        vN = normalMatrix * normal;
+        vV = -mv.xyz;
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: /* glsl */`
+      precision mediump float;
+      uniform vec3 uColor;
+      uniform float uTime, uPulse;
+      varying vec3 vN, vV;
+      void main() {
+        // fresnel rim glow: bright neon edge, darker translucent core
+        float fres = pow(1.0 - abs(dot(normalize(vN), normalize(vV))), 1.6);
+        float pulse = 1.0 + uPulse * 0.6 * sin(uTime * 14.0);
+        vec3 col = uColor * (0.30 + fres * 1.6) * pulse;
+        gl_FragColor = vec4(col, 0.55 + fres * 0.45);
+      }`
+  });
+}
+const orbs = [];
+for (let i = 0; i < ORB_POOL; i++) {
+  const mesh = new THREE.Mesh(orbGeo, makeOrbMaterial());
+  mesh.visible = false;
+  mesh.renderOrder = 1;
+  scene.add(mesh);
+  orbs.push({ mesh, active: false, bomb: false,
+              vel: new THREE.Vector3(), spin: new THREE.Vector3() });
+}
+
+/** Launch one orb (or bomb) from below the screen in a gravity arc. */
+function launchOrb() {
+  const o = orbs.find(o => !o.active);
+  if (!o) return;
+  o.active = true;
+  o.bomb = G.elapsed > 8 && Math.random() < 0.14;
+  const z = 0.9 + Math.random() * 1.7;           // real depth variety
+  // the visible frustum narrows toward the camera — scale the launch
+  // lane and arc height by depth so every orb stays on screen
+  const ds = (CAM_Z - z) / CAM_Z;
+  const x = (Math.random() - 0.5) * planeW * 0.7 * ds;
+  o.mesh.position.set(x, -planeH / 2 * ds - 0.6, z);
+  // pick apex height, derive launch speed: v = sqrt(2*g*h)
+  const h  = planeH * ds * (0.6 + Math.random() * 0.32);
+  o.vel.set(-x * 0.22 + (Math.random() - 0.5) * 0.6,
+            Math.sqrt(2 * 4.2 * h),
+            (Math.random() - 0.5) * 0.3);
+  o.spin.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
+  const m = o.mesh.material.uniforms;
+  if (o.bomb) { m.uColor.value.setHex(0xff2222); m.uPulse.value = 1; }
+  else        { m.uColor.value.setHSL(Math.random(), 0.9, 0.62); m.uPulse.value = 0; }
+  o.mesh.scale.setScalar(o.bomb ? 1.05 : 0.85 + Math.random() * 0.45);
+  o.mesh.visible = true;
+}
+
+// --- particle burst on slice (reuses the main ring buffer) ----
+function spawnBurst(p, n, power) {
+  for (let k = 0; k < n; k++) {
+    const i = cursor; cursor = (cursor + 1) % COUNT;
+    const i3 = i * 3;
+    positions[i3]   = p.x; positions[i3+1] = p.y; positions[i3+2] = p.z;
+    // radial explosion, slightly biased toward the camera for drama
+    const th = Math.random() * 6.283, ph = Math.random() * 3.141;
+    const s  = (0.6 + Math.random()) * power;
+    velocities[i3]   = Math.sin(ph) * Math.cos(th) * s;
+    velocities[i3+1] = Math.sin(ph) * Math.sin(th) * s;
+    velocities[i3+2] = Math.cos(ph) * s * 0.6 + 0.4;
+    life[i] = 1;
+  }
+}
+
+// --- floating score popups (plain DOM, cheap and crisp) -------
+const _proj = new THREE.Vector3();
+function showPop(worldPos, text, bad) {
+  _proj.copy(worldPos).project(camera);
+  const el = document.createElement('div');
+  el.className = 'pop' + (bad ? ' bad' : '');
+  el.textContent = text;
+  el.style.left = ((_proj.x * 0.5 + 0.5) * innerWidth) + 'px';
+  el.style.top  = ((-_proj.y * 0.5 + 0.5) * innerHeight) + 'px';
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 850);
+}
+
+// --- tiny WebAudio synth (no assets; unlocked by the start tap) ---
+let actx = null;
+function initAudio() {
+  if (!actx) try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+  if (actx && actx.state === 'suspended') actx.resume();
+}
+function blip(freq, dur, type, vol) {
+  if (!actx) return;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.setValueAtTime(vol, actx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + dur);
+  o.connect(g).connect(actx.destination);
+  o.start(); o.stop(actx.currentTime + dur);
+}
+const sSlice = () => { blip(480 + Math.min(G.combo, 12) * 70, 0.09, 'triangle', 0.18);
+                       blip(960 + Math.min(G.combo, 12) * 90, 0.05, 'sine', 0.10); };
+const sBomb  = () => { blip(75, 0.35, 'sawtooth', 0.3); blip(55, 0.5, 'square', 0.2); };
+const sTick  = () => blip(1250, 0.04, 'square', 0.08);
+const sEnd   = () => { blip(520, 0.18, 'sine', 0.2);
+                       setTimeout(() => blip(390, 0.4, 'sine', 0.2), 160); };
+
+// --- HUD refs -------------------------------------------------
+const elScore = document.getElementById('score');
+const elCombo = document.getElementById('combo');
+const elTimer = document.getElementById('timer');
+const elHud   = document.getElementById('gamehud');
+const elResults = document.getElementById('results');
+
+function comboMult() { return Math.min(1 + Math.floor(G.combo / 3), 5); }
+
+function onSlice(o) {
+  const p = o.mesh.position;
+  if (o.bomb) {
+    G.score = Math.max(0, G.score - 25);
+    G.combo = 0;
+    G.glitchKick = 1.6;                 // full-screen damage glitch
+    spawnBurst(p, 70, 4.5);
+    showPop(p, '-25', true);
+    sBomb();
+  } else {
+    G.combo++; G.comboTimer = COMBO_WINDOW;
+    const pts = 10 * comboMult();
+    G.score += pts;
+    spawnBurst(p, 55, 3.2);
+    showPop(p, '+' + pts + (comboMult() > 1 ? '  ×' + comboMult() : ''), false);
+    sSlice();
+  }
+  o.active = false; o.mesh.visible = false;
+}
+
+/** One game step per rendered frame. */
+function updateGame(dt) {
+  if (G.state !== 'playing') return;
+  G.elapsed += dt;
+  G.timeLeft -= dt;
+  G.glitchKick *= Math.exp(-2.2 * dt);
+  videoUniforms.uGlitch.value = Math.min(1.2, preset.glitch + G.glitchKick);
+
+  // combo decays when you stop slicing
+  if (G.comboTimer > 0) { G.comboTimer -= dt; if (G.comboTimer <= 0) G.combo = 0; }
+
+  // spawn cadence ramps up over the round
+  G.spawnTimer -= dt;
+  if (G.spawnTimer <= 0) {
+    launchOrb();
+    if (Math.random() < 0.28) launchOrb();
+    G.spawnTimer = 1.15 - 0.65 * Math.min(G.elapsed / ROUND_SECONDS, 1);
+  }
+
+  // physics + slicing
+  for (const o of orbs) {
+    if (!o.active) continue;
+    o.vel.y -= 4.2 * dt;
+    o.mesh.position.addScaledVector(o.vel, dt);
+    o.mesh.rotation.x += o.spin.x * dt;
+    o.mesh.rotation.y += o.spin.y * dt;
+    o.mesh.material.uniforms.uTime.value = clock.elapsedTime;
+    if (o.mesh.position.y < -planeH / 2 - 1) {      // fell out unsliced
+      o.active = false; o.mesh.visible = false;
+      if (!o.bomb) G.combo = 0;                     // dropped one: chain ends
+      continue;
+    }
+    // test every fast-moving fingertip segment against this orb.
+    // The test is perspective-correct 2D ("as seen on screen"): depth
+    // from MediaPipe is too fuzzy to demand true 3D contact, and the
+    // player judges overlap visually anyway.
+    const r = (0.26 * o.mesh.scale.x + 0.17) / (CAM_Z - o.mesh.position.z);
+    let cut = false;
+    for (const hand of handState) {
+      if (!hand.active || cut) continue;
+      for (const tip of hand.tips) {
+        if (tip.vel.length() < G.sliceSpeed) continue;
+        if (angSegDist(o.mesh.position, tip.pos, tip.vel) < r) { cut = true; break; }
+      }
+    }
+    // pointer swipes stay "hot" briefly after release so a fast flick
+    // that ends between two rendered frames still counts
+    if (!cut && (pointer.active || performance.now() - pointer.t < 150) &&
+        pointer.vel.length() > G.sliceSpeed &&
+        angSegDist(o.mesh.position, pointer.pos, pointer.vel) < r) cut = true;
+    if (cut) onSlice(o);
+  }
+
+  // HUD
+  elScore.textContent = G.score;
+  const m = comboMult();
+  elCombo.textContent = G.combo >= 2 ? `combo ×${m}` : '';
+  if (G.combo >= 2 && !elCombo.classList.contains('bump')) {
+    elCombo.classList.add('bump'); setTimeout(() => elCombo.classList.remove('bump'), 130);
+  }
+  const secs = Math.max(0, Math.ceil(G.timeLeft));
+  elTimer.textContent = secs;
+  elTimer.classList.toggle('low', secs <= 5);
+  if (secs <= 5 && secs !== G.lastTick && secs > 0) { sTick(); G.lastTick = secs; }
+
+  if (G.timeLeft <= 0) endRound();
+}
+
+// Perspective-correct 2D slice test. Positions are projected to
+// angular coordinates (x,y divided by distance from the camera), so
+// "distance" means separation as seen on screen, and the fingertip's
+// swept segment [pos - vel*dt, pos] is tested against the orb center.
+function ang(px, py, pz, out) {
+  const d = Math.max(CAM_Z - pz, 0.4);
+  out.x = px / d; out.y = py / d;
+  return out;
+}
+const _aa = { x: 0, y: 0 }, _ab = { x: 0, y: 0 }, _ac = { x: 0, y: 0 };
+function angSegDist(c, tipPos, tipVel) {
+  ang(c.x, c.y, c.z, _ac);
+  ang(tipPos.x - tipVel.x * 0.034, tipPos.y - tipVel.y * 0.034, tipPos.z, _aa);
+  ang(tipPos.x, tipPos.y, tipPos.z, _ab);
+  const bx = _ab.x - _aa.x, by = _ab.y - _aa.y;
+  const cx = _ac.x - _aa.x, cy = _ac.y - _aa.y;
+  const t = THREE.MathUtils.clamp(
+    (cx * bx + cy * by) / Math.max(bx * bx + by * by, 1e-8), 0, 1);
+  const dx = cx - bx * t, dy = cy - by * t;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function startRound() {
+  G.state = 'playing';
+  G.score = 0; G.combo = 0; G.comboTimer = 0;
+  G.timeLeft = ROUND_SECONDS; G.elapsed = 0;
+  G.spawnTimer = 0.6; G.glitchKick = 0; G.lastTick = -1;
+  for (const o of orbs) { o.active = false; o.mesh.visible = false; }
+  elResults.classList.remove('show');
+  elHud.style.display = 'flex';
+}
+
+function endRound() {
+  G.state = 'over';
+  sEnd();
+  for (const o of orbs) { o.active = false; o.mesh.visible = false; }
+  const b = Math.max(best(), G.score);
+  localStorage.setItem('sliceninja-best', b);
+  document.getElementById('finalScore').textContent = G.score;
+  document.getElementById('bestScore').textContent =
+    G.score >= b && G.score > 0 ? '★ new best!' : `best: ${b}`;
+  elResults.classList.add('show');
+}
+document.getElementById('againBtn').addEventListener('click', () => { initAudio(); startRound(); });
+
+/* ============================================================
    SECTION: HAND TRACKING (MediaPipe Hands)
    Fingertip landmarks (indices 4,8,12,16,20) of up to 2 hands are
    mapped from video UV space into world space on the video plane,
@@ -774,7 +1128,9 @@ function emit(dt) {
   }
 
   // hand speed -> normalized distortion, eased for a liquid feel
-  const target = THREE.MathUtils.clamp(totalSpeed * 0.09 * preset.distortion, 0, 1.2);
+  // (plus the bomb-hit shock from the game layer)
+  const target = THREE.MathUtils.clamp(
+    totalSpeed * 0.09 * preset.distortion + G.glitchKick, 0, 1.6);
   videoUniforms.uDistortion.value += (target - videoUniforms.uDistortion.value) * (target > videoUniforms.uDistortion.value ? 0.25 : 0.05);
 
   // feed per-hand ripple centers + strengths to the video shader
@@ -806,6 +1162,7 @@ function animate() {
 
   emit(dt);
   simulate(dt);
+  updateGame(dt);
 
   // --- camera parallax ---
   // The camera counter-moves against the (smoothed) hand position, so
@@ -906,8 +1263,12 @@ const overlay = document.getElementById('overlay');
 const statusEl = document.getElementById('status');
 const setStatus = s => statusEl.textContent = s;
 
+// debug handle (used by automated tests; no effect on gameplay)
+window.__dbg = { G, orbs, pointer, angSegDist };
+
 document.getElementById('startBtn').addEventListener('click', async () => {
   try {
+    initAudio();                         // unlock WebAudio on the tap
     setStatus('Requesting camera…');
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error('Camera API unavailable. This page must be served over HTTPS.');
@@ -937,15 +1298,16 @@ document.getElementById('startBtn').addEventListener('click', async () => {
     detectLoop();                  // hand detection @ ≤30 Hz
     animate();                     // render loop @ display rate
 
-    // hide the overlay on the first successful inference (model warm)
+    // hide the overlay + start the round on first inference (model warm)
+    const begin = () => {
+      overlay.classList.add('hidden');
+      if (G.state === 'idle') startRound();
+    };
     const waitReady = setInterval(() => {
-      if (modelReady) {
-        clearInterval(waitReady);
-        overlay.classList.add('hidden');
-      }
+      if (modelReady) { clearInterval(waitReady); begin(); }
     }, 100);
     // …but never trap the user: bail out after 12s and start anyway
-    setTimeout(() => { clearInterval(waitReady); overlay.classList.add('hidden'); }, 12000);
+    setTimeout(() => { clearInterval(waitReady); begin(); }, 12000);
   } catch (err) {
     setStatus(err.name === 'NotAllowedError'
       ? 'Camera permission denied — allow it in Settings ▸ Safari ▸ Camera.'
